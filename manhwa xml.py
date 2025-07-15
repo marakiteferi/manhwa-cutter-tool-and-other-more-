@@ -10,7 +10,10 @@ import uuid
 # --- Core Logic (SRT Parser is unchanged) ---
 
 def parse_srt_file(filepath):
-    """Parses an SRT file, converting timestamps to total seconds (float)."""
+    """
+    Parses an SRT file, converting timestamps to total seconds (float).
+    Handles timestamps with or without milliseconds.
+    """
     if not filepath:
         raise ValueError("SRT file path is missing.")
     with open(filepath, 'r', encoding='utf-8-sig') as f:
@@ -20,22 +23,37 @@ def parse_srt_file(filepath):
     blocks = content.strip().split('\n\n')
     for block in blocks:
         lines = block.strip().split('\n')
-        if len(lines) >= 3:
+        if len(lines) >= 2: # A valid block needs at least a number and a time line.
             try:
                 time_line = lines[1].split(' --> ')
                 start_time_str = time_line[0].replace(',', '.')
                 end_time_str = time_line[1].replace(',', '.')
-                start_dt = datetime.strptime(start_time_str, "%H:%M:%S.%f")
-                end_dt = datetime.strptime(end_time_str, "%H:%M:%S.%f")
+
+                # --- FIX: Handle timestamps with or without milliseconds ---
+                try:
+                    start_dt = datetime.strptime(start_time_str, "%H:%M:%S.%f")
+                except ValueError:
+                    start_dt = datetime.strptime(start_time_str, "%H:%M:%S")
+
+                try:
+                    end_dt = datetime.strptime(end_time_str, "%H:%M:%S.%f")
+                except ValueError:
+                    end_dt = datetime.strptime(end_time_str, "%H:%M:%S")
+                # --- END FIX ---
+
                 start_seconds = start_dt.hour * 3600 + start_dt.minute * 60 + start_dt.second + start_dt.microsecond / 1_000_000
                 end_seconds = end_dt.hour * 3600 + end_dt.minute * 60 + end_dt.second + end_dt.microsecond / 1_000_000
+                
+                # The text part is optional
+                text_content = ' '.join(lines[2:]) if len(lines) >= 3 else ""
+
                 entries.append({
                     'start': start_seconds,
                     'end': end_seconds,
-                    'text': ' '.join(lines[2:])
+                    'text': text_content
                 })
-            except (ValueError, IndexError):
-                print(f"Skipping malformed SRT block: {block}")
+            except (ValueError, IndexError) as e:
+                print(f"Skipping malformed SRT block: {block} | Error: {e}")
                 continue
     return entries
 
@@ -93,7 +111,7 @@ def generate_premiere_xml(subtitles, image_map, image_folder, output_path, frame
             continue
             
         # Find all images associated with this subtitle's start time
-        # Note: The key format must exactly match how the JSON was created.
+        # This key generation truncates milliseconds to match the JSON key format.
         start_time_key = datetime.utcfromtimestamp(entry['start']).strftime("%H:%M:%S")
         images_for_this_subtitle = image_map.get(start_time_key, [])
         
@@ -101,7 +119,8 @@ def generate_premiere_xml(subtitles, image_map, image_folder, output_path, frame
         num_images = len(images_for_this_subtitle)
         if num_images == 0:
             # This case can happen if a subtitle has no corresponding image in the JSON map.
-            # You might want to add a placeholder or just skip it. Here, we skip.
+            # We print a warning and skip it.
+            print(f"Warning: No image mapping found for key: {start_time_key} (at {entry['start']:.3f}s)")
             continue 
 
         image_duration_seconds = total_slot_duration / num_images
@@ -217,6 +236,9 @@ class AutoEditorApp:
             vid_height = int(self.height.get())
 
             subtitles = parse_srt_file(self.srt_path.get())
+            if not subtitles:
+                raise ValueError("Could not parse any valid entries from the SRT file.")
+
             with open(self.json_path.get(), 'r', encoding='utf-8') as f:
                 image_map = json.load(f)
             
