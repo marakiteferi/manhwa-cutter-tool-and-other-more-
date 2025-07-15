@@ -39,17 +39,20 @@ def parse_srt_file(filepath):
                 continue
     return entries
 
-# --- XML Generation (Updated for Gapless Timeline) ---
+# --- XML Generation (Updated for Sequential Images) ---
 
 def generate_premiere_xml(subtitles, image_map, image_folder, output_path, frame_rate=30, width=1920, height=1080):
-    """Generates a native Premiere Pro compatible XML file with no gaps."""
+    """
+    Generates a native Premiere Pro compatible XML file.
+    When multiple images are assigned to a subtitle, they are placed sequentially.
+    """
     
     xmeml = ET.Element("xmeml", version="4")
     sequence = ET.SubElement(xmeml, "sequence", id="seq-1")
     
     sequence.set("TL.SQAudioVisibleBase", "0")
     sequence.set("TL.SQVideoVisibleBase", "0")
-    sequence.set("Monitor.ProgramZoomRect", "0 0 1920 1080")
+    sequence.set("Monitor.ProgramZoomRect", f"0 0 {width} {height}")
     
     max_duration_seconds = max(entry['end'] for entry in subtitles) if subtitles else 0
     duration_frames = int(max_duration_seconds * frame_rate)
@@ -59,7 +62,7 @@ def generate_premiere_xml(subtitles, image_map, image_folder, output_path, frame
     ET.SubElement(rate, "timebase").text = str(frame_rate)
     ET.SubElement(rate, "ntsc").text = "FALSE"
     
-    ET.SubElement(sequence, "name").text = "Automated Manhwa Timeline (Gapless)"
+    ET.SubElement(sequence, "name").text = "Automated Manhwa Timeline (Sequential)"
     
     media = ET.SubElement(sequence, "media")
     video = ET.SubElement(media, "video")
@@ -71,39 +74,57 @@ def generate_premiere_xml(subtitles, image_map, image_folder, output_path, frame
     
     track = ET.SubElement(video, "track")
     
-    # --- Populate Track with Clips (GAPLESS LOGIC) ---
+    # --- Populate Track with Clips (SEQUENTIAL LOGIC) ---
     for i, entry in enumerate(subtitles):
-        start_seconds = entry['start']
+        # Determine the total time slot for this subtitle entry
+        slot_start_seconds = entry['start']
         
-        # 💡 NEW: Determine the end time.
-        # If it's the last clip, use its original end time.
-        # Otherwise, use the start time of the next clip.
         is_last_clip = (i == len(subtitles) - 1)
         if is_last_clip:
-            end_seconds = entry['end']
+            slot_end_seconds = entry['end']
         else:
-            end_seconds = subtitles[i+1]['start']
+            # End time is the start of the next subtitle for a gapless timeline
+            slot_end_seconds = subtitles[i+1]['start']
 
-        # Ensure clip has a non-zero duration
-        if end_seconds <= start_seconds:
+        total_slot_duration = slot_end_seconds - slot_start_seconds
+
+        # Ensure the time slot has a positive duration
+        if total_slot_duration <= 0:
             continue
             
-        start_time_key = datetime.strftime(datetime(1900,1,1) + (datetime.fromtimestamp(start_seconds) - datetime.fromtimestamp(0)), "%H:%M:%S")
+        # Find all images associated with this subtitle's start time
+        # Note: The key format must exactly match how the JSON was created.
+        start_time_key = datetime.utcfromtimestamp(entry['start']).strftime("%H:%M:%S")
         images_for_this_subtitle = image_map.get(start_time_key, [])
         
-        for img_name_raw in images_for_this_subtitle:
+        # --- LOGIC: Calculate duration for each image ---
+        num_images = len(images_for_this_subtitle)
+        if num_images == 0:
+            # This case can happen if a subtitle has no corresponding image in the JSON map.
+            # You might want to add a placeholder or just skip it. Here, we skip.
+            continue 
+
+        image_duration_seconds = total_slot_duration / num_images
+        
+        # --- LOGIC: Loop and place each image sequentially within the slot ---
+        for j, img_name_raw in enumerate(images_for_this_subtitle):
             img_name = img_name_raw.strip()
             image_path = Path(image_folder) / img_name
             
             if not image_path.exists():
-                raise FileNotFoundError(f"Image not found: {image_path}")
+                print(f"Warning: Image not found and will be skipped: {image_path}")
+                continue
+
+            # Calculate the specific start and end time for *this* image
+            clip_start_seconds = slot_start_seconds + (j * image_duration_seconds)
+            clip_end_seconds = clip_start_seconds + image_duration_seconds
 
             clip_item = ET.SubElement(track, "clipitem", id=f"clip-{uuid.uuid4().hex[:8]}")
             
-            ET.SubElement(clip_item, "start").text = str(int(start_seconds * frame_rate))
-            ET.SubElement(clip_item, "end").text = str(int(end_seconds * frame_rate))
+            ET.SubElement(clip_item, "start").text = str(int(clip_start_seconds * frame_rate))
+            ET.SubElement(clip_item, "end").text = str(int(clip_end_seconds * frame_rate))
             ET.SubElement(clip_item, "in").text = "0"
-            ET.SubElement(clip_item, "out").text = str(int((end_seconds - start_seconds) * frame_rate))
+            ET.SubElement(clip_item, "out").text = str(int((clip_end_seconds - clip_start_seconds) * frame_rate))
             
             file_elem = ET.SubElement(clip_item, "file", id=f"file-{uuid.uuid4().hex[:8]}")
             ET.SubElement(file_elem, "name").text = img_name
@@ -120,7 +141,7 @@ def generate_premiere_xml(subtitles, image_map, image_folder, output_path, frame
     tree.write(output_path, encoding="utf-8", xml_declaration=True)
 
 
-# --- GUI (No changes needed here) ---
+# --- GUI (Unchanged) ---
 class AutoEditorApp:
     def __init__(self, master):
         self.master = master
@@ -205,7 +226,8 @@ class AutoEditorApp:
         except Exception as e:
             messagebox.showerror("Error", f"An error occurred:\n\n{type(e).__name__}: {e}")
 
+# --- Main Execution Block ---
 if __name__ == "__main__":
     root = tk.Tk()
     app = AutoEditorApp(root)
-    root.mainloop()
+    root.mainloop() # This line is essential for the GUI to run
