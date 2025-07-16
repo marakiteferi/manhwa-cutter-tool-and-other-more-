@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import json
 import re
+import sys
 
 # --- Dependency Checks ---
 try:
@@ -38,6 +39,9 @@ class EnhancedSubtitleImageMapper:
         self.style = ttk.Style(self.master)
         self.style.theme_use('clam')
         self.style.configure("Selected.TFrame", background="#cce5ff") # Highlight color
+        self.style.configure("Selected.TLabel", background="#cce5ff", relief="solid", borderwidth=2) # For selected thumbnail
+        self.style.configure("TLabel", padding=5)
+
         self._create_widgets()
         self._bind_keys()
         self._update_ui_state()
@@ -117,26 +121,42 @@ class EnhancedSubtitleImageMapper:
         right_pane = ttk.Frame(main_paned_window)
         main_paned_window.add(right_pane, weight=1)
         
-        # Go To Image field
+        right_pane.grid_rowconfigure(1, weight=1)
+        right_pane.grid_columnconfigure(0, weight=1)
+        
         goto_frame = ttk.Frame(right_pane, padding=(0, 5))
-        goto_frame.pack(fill=tk.X)
+        goto_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
         ttk.Label(goto_frame, text="Go to Image (name):").pack(side=tk.LEFT)
         self.goto_entry = ttk.Entry(goto_frame)
         self.goto_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         self.goto_entry.bind("<Return>", self.go_to_image)
 
-        # Canvas for scrollable thumbnails
-        thumb_canvas = tk.Canvas(right_pane)
-        thumb_scrollbar = ttk.Scrollbar(right_pane, orient="vertical", command=thumb_canvas.yview)
-        self.thumb_frame = ttk.Frame(thumb_canvas) # This frame holds the thumbnails
+        self.thumb_canvas = tk.Canvas(right_pane)
+        thumb_scrollbar = ttk.Scrollbar(right_pane, orient="vertical", command=self.thumb_canvas.yview)
+        self.thumb_frame = ttk.Frame(self.thumb_canvas)
         
-        self.thumb_frame.bind("<Configure>", lambda e: thumb_canvas.configure(scrollregion=thumb_canvas.bbox("all")))
-        thumb_canvas.create_window((0, 0), window=self.thumb_frame, anchor="nw")
-        thumb_canvas.configure(yscrollcommand=thumb_scrollbar.set)
+        self.thumb_frame.bind("<Configure>", lambda e: self.thumb_canvas.configure(scrollregion=self.thumb_canvas.bbox("all")))
+        self.thumb_canvas.create_window((0, 0), window=self.thumb_frame, anchor="nw")
+        self.thumb_canvas.configure(yscrollcommand=thumb_scrollbar.set)
 
-        thumb_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        thumb_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.thumb_canvas.grid(row=1, column=0, sticky="nsew")
+        thumb_scrollbar.grid(row=1, column=1, sticky="ns")
+        
+        # --- FIX: Bind mouse wheel scrolling to the canvas and its children ---
+        self.thumb_frame.bind("<MouseWheel>", self._on_mousewheel)
+        self.thumb_canvas.bind("<MouseWheel>", self._on_mousewheel)
 
+    def _on_mousewheel(self, event):
+        """Platform-independent mouse wheel scrolling."""
+        if sys.platform.startswith('win'):
+            self.thumb_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        elif sys.platform == 'darwin': # macOS
+            self.thumb_canvas.yview_scroll(int(-1 * event.delta), "units")
+        else: # Linux
+            if event.num == 4:
+                self.thumb_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                self.thumb_canvas.yview_scroll(1, "units")
 
     def _bind_keys(self):
         self.master.bind('<Left>', lambda e: self.prev_image())
@@ -159,10 +179,6 @@ class EnhancedSubtitleImageMapper:
         self.next_img_btn['state'] = state
         self.goto_entry['state'] = state
 
-        state = tk.NORMAL if srt_loaded and img_loaded else tk.DISABLED
-        # self.assign_btn['state'] = state # Assign button is handled by show_image
-
-    # --- File Handling & Data Loading ---
     def load_srt(self):
         path = filedialog.askopenfilename(filetypes=[("SRT Files", "*.srt")])
         if path:
@@ -190,30 +206,39 @@ class EnhancedSubtitleImageMapper:
                     messagebox.showwarning("No Images", "No valid image files found.")
                     return
                 self.current_img_index = 0
-                self.show_image()
                 self.populate_thumbnails()
+                self.show_image()
                 self._update_ui_state()
             except Exception as e:
                 messagebox.showerror("Error Loading Images", f"An error occurred: {e}")
 
     def populate_thumbnails(self):
-        # Clear existing thumbnails
         for widget in self.thumb_frame.winfo_children():
             widget.destroy()
         self.thumbnail_widgets = []
+
+        # --- FIX: Configure columns for grid layout ---
+        num_columns = 2
+        for i in range(num_columns):
+            self.thumb_frame.grid_columnconfigure(i, weight=1)
 
         for index, filename in enumerate(self.image_files):
             try:
                 img_path = os.path.join(self.image_folder, filename)
                 img = Image.open(img_path)
-                img.thumbnail((100, 100))
+                img.thumbnail((200, 200)) # Increased thumbnail size
                 img_tk = ImageTk.PhotoImage(img)
 
-                thumb_label = ttk.Label(self.thumb_frame, image=img_tk, text=filename, compound='top', padding=5)
-                thumb_label.image = img_tk # Keep reference
-                thumb_label.pack(pady=5, padx=5)
+                thumb_label = ttk.Label(self.thumb_frame, image=img_tk, text=filename, compound='top')
+                thumb_label.image = img_tk
                 
-                # Bind click to both assign and select
+                # --- FIX: Place thumbnails in a grid ---
+                row = index // num_columns
+                col = index % num_columns
+                thumb_label.grid(row=row, column=col, pady=5, padx=5, sticky="ew")
+                
+                # --- FIX: Bind mouse wheel to each thumbnail as well ---
+                thumb_label.bind("<MouseWheel>", self._on_mousewheel)
                 thumb_label.bind("<Button-1>", lambda e, i=index: self.on_thumbnail_click(i))
                 self.thumbnail_widgets.append(thumb_label)
             except Exception as e:
@@ -240,13 +265,11 @@ class EnhancedSubtitleImageMapper:
                 json.dump(self.mapping, f, indent=2, sort_keys=True)
             messagebox.showinfo("Exported", f"Mapping saved to {save_path}")
 
-    # --- UI Update and Display ---
     def update_subtitle_display(self):
         if not self.subtitles: return
         
-        # Highlight current subtitle
         self.subtitle_frame.configure(style="Selected.TFrame")
-        self.master.after(200, lambda: self.subtitle_frame.configure(style="TFrame")) # Flash effect
+        self.master.after(200, lambda: self.subtitle_frame.configure(style="TFrame"))
 
         sub = self.subtitles[self.current_sub_index]
         time_key = self.get_current_time_key()
@@ -264,13 +287,10 @@ class EnhancedSubtitleImageMapper:
         
         img_path = os.path.join(self.image_folder, self.image_files[self.current_img_index])
         
-        # Update main image viewer
         try:
             img = Image.open(img_path)
-            # Calculate aspect ratio to fit the panel
-            panel_width = 600
-            panel_height = 600
-            img.thumbnail((panel_width, panel_height))
+            # Use a fixed, reasonable size for the main viewer to avoid layout shifts
+            img.thumbnail((self.image_panel.winfo_width(), self.image_panel.winfo_height()))
             img_tk = ImageTk.PhotoImage(img)
             
             self.image_panel.config(image=img_tk)
@@ -279,16 +299,13 @@ class EnhancedSubtitleImageMapper:
             self.image_panel.config(text=f"Error:\nCould not load\n{self.image_files[self.current_img_index]}", image='')
             print(f"Error displaying image: {e}")
         
-        # Highlight thumbnail
         for i, thumb in enumerate(self.thumbnail_widgets):
-            thumb.configure(relief="flat", borderwidth=0)
+            thumb.configure(style="TLabel")
         
         if self.thumbnail_widgets:
             current_thumb = self.thumbnail_widgets[self.current_img_index]
-            current_thumb.configure(relief="solid", borderwidth=2)
+            current_thumb.configure(style="Selected.TLabel")
 
-
-    # --- Core Logic and Navigation ---
     def get_current_time_key(self):
         if not self.subtitles: return ""
         sub = self.subtitles[self.current_sub_index]
@@ -326,9 +343,8 @@ class EnhancedSubtitleImageMapper:
         query = self.goto_entry.get()
         if not query: return
 
-        # Find the first filename that contains the query
         for index, filename in enumerate(self.image_files):
-            if query in filename:
+            if query.lower() in filename.lower():
                 self.current_img_index = index
                 self.show_image()
                 return
